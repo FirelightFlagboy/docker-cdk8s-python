@@ -1,0 +1,67 @@
+name: Build & Publish docker
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: docker-build-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log into registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PAT }}
+
+      - name: Read version
+        id: version
+        run: (echo -n version=; cat VERSION) >> "$GITHUB_OUTPUT"
+        
+      - name: Generate tags & labels
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: docker.io/firelightflagbot/cdk8s-python-uv          
+          tags:
+            type=raw,value=${{ steps.version.outputs.version }}
+      
+      - name: Build & Push Docker
+        id: build-and-push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          provenance: mode=max
+          sbom: true
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Sign the published docker image
+        if: github.event_name == 'push'
+        run: printenv TAGS | xargs -I {} cosign sign --yes {}@${DIGEST}
+        env:
+          TAGS: ${{ steps.metadata.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+
+
